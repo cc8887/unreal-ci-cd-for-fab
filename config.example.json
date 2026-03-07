@@ -2,7 +2,10 @@
   "PluginName": "YourPluginName",
   "PluginSourceDirectory": "C:/Path/To/Your/PluginSource",
   "OutputDirectory": "./Builds",
-  "UnrealEngineBasePath": "C:/Program Files/Epic Games",
+  "UnrealEngineBasePath": [
+    "C:/Program Files/Epic Games",
+    "D:/Other/Location/Epic Games"
+  ],
   "EngineVersions": [
     "5.1",
     "5.2",

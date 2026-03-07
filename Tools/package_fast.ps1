@@ -79,7 +79,23 @@ $VersionsToProcess = if (-not [string]::IsNullOrEmpty($EngineVersion)) { @($Engi
 
 foreach ($CurrentEngineVersion in $VersionsToProcess) {
     $CurrentStage = "SETUP"
-    $EnginePath = Join-Path -Path $Config.UnrealEngineBasePath -ChildPath "UE_$CurrentEngineVersion"
+    
+    # Resolve Engine Path
+    $EngineBasePaths = @($Config.UnrealEngineBasePath)
+    $EnginePath = $null
+    foreach ($BasePath in $EngineBasePaths) {
+        $PotentialPath = Join-Path -Path $BasePath -ChildPath "UE_$CurrentEngineVersion"
+        if (Test-Path $PotentialPath) {
+            $EnginePath = $PotentialPath
+            break
+        }
+    }
+    
+    if (-not $EnginePath) {
+        Write-Error "Could not find UE_$CurrentEngineVersion in any of the configured base paths."
+        continue
+    }
+
     $LogFile = Join-Path -Path $LogsDir -ChildPath "BuildLog_UE_${CurrentEngineVersion}_$Timestamp.txt"
 
     # Define paths for temporary and final artifacts for this version

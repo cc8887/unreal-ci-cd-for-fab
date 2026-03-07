@@ -68,8 +68,16 @@ $RequiredFields = @{
     "PluginName" = "string"
     "PluginSourceDirectory" = "string"
     "OutputDirectory" = "string"
-    "UnrealEngineBasePath" = "string"
     "EngineVersions" = "array"
+}
+
+# Special check for UnrealEngineBasePath (can be string or array)
+if (-not $Config.PSObject.Properties.Name.Contains("UnrealEngineBasePath")) {
+    Add-ValidationError "Missing required field: 'UnrealEngineBasePath'"
+} elseif ([string]::IsNullOrWhiteSpace($Config.UnrealEngineBasePath) -and $Config.UnrealEngineBasePath -isnot [Array]) {
+    Add-ValidationError "Field 'UnrealEngineBasePath' cannot be empty"
+} else {
+    Test-ValidationSuccess "Required field 'UnrealEngineBasePath' is valid"
 }
 
 foreach ($field in $RequiredFields.Keys) {
@@ -118,14 +126,22 @@ if (-not $SkipEngineValidation) {
     Write-Host "`n[3/6] Validating Unreal Engine installations..." -ForegroundColor Yellow
     
     if ($Config.EngineVersions -and $Config.EngineVersions.Count -gt 0) {
+        $EngineBasePaths = @($Config.UnrealEngineBasePath)
         foreach ($Version in $Config.EngineVersions) {
-            $EnginePath = Join-Path -Path $Config.UnrealEngineBasePath -ChildPath "UE_$Version"
-            $EngineExe = Join-Path -Path $EnginePath -ChildPath "Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+            $FoundEngine = $false
+            foreach ($BasePath in $EngineBasePaths) {
+                $EnginePath = Join-Path -Path $BasePath -ChildPath "UE_$Version"
+                $EngineExe = Join-Path -Path $EnginePath -ChildPath "Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+                
+                if (Test-Path $EngineExe) {
+                    Test-ValidationSuccess "Unreal Engine $Version found at '$EnginePath'"
+                    $FoundEngine = $true
+                    break
+                }
+            }
             
-            if (Test-Path $EngineExe) {
-                Test-ValidationSuccess "Unreal Engine $Version found"
-            } else {
-                Add-ValidationError "Unreal Engine $Version not found at '$EnginePath'"
+            if (-not $FoundEngine) {
+                Add-ValidationError "Unreal Engine $Version not found in any of the provided base paths: $($EngineBasePaths -join ', ')"
             }
         }
     } else {

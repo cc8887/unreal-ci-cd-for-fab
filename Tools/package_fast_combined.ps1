@@ -63,7 +63,23 @@ $VersionsToProcess = if (-not [string]::IsNullOrEmpty($EngineVersion)) { @($Engi
 foreach ($CurrentEngineVersion in $VersionsToProcess) {
     $CurrentStage = "SETUP"
     $LogFile = Join-Path -Path $LogsDir -ChildPath "Log_FastCombined_UE_${CurrentEngineVersion}.txt"
-    $EnginePath = Join-Path -Path $Config.UnrealEngineBasePath -ChildPath "UE_$CurrentEngineVersion"
+    
+    # Resolve Engine Path
+    $EngineBasePaths = @($Config.UnrealEngineBasePath)
+    $EnginePath = $null
+    foreach ($BasePath in $EngineBasePaths) {
+        $PotentialPath = Join-Path -Path $BasePath -ChildPath "UE_$CurrentEngineVersion"
+        if (Test-Path $PotentialPath) {
+            $EnginePath = $PotentialPath
+            break
+        }
+    }
+    
+    if (-not $EnginePath) {
+        Write-Error "Could not find UE_$CurrentEngineVersion in any of the configured base paths."
+        continue
+    }
+
     $TempProjectDir = Join-Path -Path $OutputDirectory -ChildPath "Ex$($CurrentEngineVersion)"
     
     # --- Get Project Version from DefaultGame.ini ---
