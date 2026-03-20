@@ -56,7 +56,23 @@ $VersionsToProcess = if (-not [string]::IsNullOrEmpty($EngineVersion)) { @($Engi
 foreach ($CurrentEngineVersion in $VersionsToProcess) {
     $CurrentStage = "SETUP"
     $LogFile = Join-Path -Path $LogsDir -ChildPath "Log_ExampleProject_UE_${CurrentEngineVersion}.txt"
-    $EnginePath = Join-Path -Path $Config.UnrealEngineBasePath -ChildPath "UE_$CurrentEngineVersion"
+    
+    # Resolve Engine Path
+    $EngineBasePaths = @($Config.UnrealEngineBasePath)
+    $EnginePath = $null
+    foreach ($BasePath in $EngineBasePaths) {
+        $PotentialPath = Join-Path -Path $BasePath -ChildPath "UE_$CurrentEngineVersion"
+        if (Test-Path $PotentialPath) {
+            $EnginePath = $PotentialPath
+            break
+        }
+    }
+    
+    if (-not $EnginePath) {
+        Write-Error "Could not find UE_$CurrentEngineVersion in any of the configured base paths."
+        continue
+    }
+
     $TempProjectDir = Join-Path -Path $OutputDirectory -ChildPath "Ex$($CurrentEngineVersion)"
     
     # --- Get Project Version from DefaultGame.ini ---
@@ -123,7 +139,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         $CurrentStage = "COPY"
         Write-Host "[1/7] Copying master project..."
         
-        $ExcludeDirs = @( ".git", ".vs", ".idea", ".vscode", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", "Platforms" )
+        $ExcludeDirs = @( ".git", ".vs", ".idea", ".vscode", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", "Platforms", ".claude" )
         $ExcludeFiles = @( "*.sln", "*.suo", "*.VC.db", "*.DotSettings.user", ".vsconfig", "GEMINI.md", ".gitignore", ".gitmodules" )
         if ($Config.ExampleProject.ExcludeFiles) {
             $ExcludeFiles += $Config.ExampleProject.ExcludeFiles
