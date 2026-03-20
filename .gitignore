@@ -18,6 +18,7 @@ Saved/
 .idea/
 .vs/
 .vscode/
+.claude/
 
 # --- Unreal Local CI/CD Tool Specific ---
 # Ignore the generated template project

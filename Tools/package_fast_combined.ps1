@@ -122,6 +122,9 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
 
         # --- SETUP BUILD CONFIG ---
         New-Item -Path $UserBuildConfigDir -ItemType Directory -Force | Out-Null
+        if (Test-Path $UserBuildConfigBackupPath) {
+            Remove-Item -Path $UserBuildConfigBackupPath -Force
+        }
         if (Test-Path $UserBuildConfigPath) {
             Rename-Item -Path $UserBuildConfigPath -NewName "BuildConfiguration.xml.bak" -Force
         }
@@ -227,7 +230,14 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
             $UProjectJsonOnTemp.EngineAssociation = $CurrentEngineVersion
             $UProjectJsonOnTemp | ConvertTo-Json -Depth 10 | Out-File -FilePath $TempUProjectPath -Encoding utf8
 
-            & $UnrealEditorPath "$TempUProjectPath" -run=ResavePackages -allowcommandletrendering -autocheckout -projectonly | Tee-Object -FilePath $LogFile -Append
+            # Kill any orphaned UnrealEditor processes that could hold a mutex and block us
+            Get-Process -Name "UnrealEditor-Cmd", "UnrealEditor" -ErrorAction SilentlyContinue | ForEach-Object {
+                Write-Warning "Killing orphaned Unreal process: $($_.Name) (PID $($_.Id))"
+                $_.Kill()
+                $_.WaitForExit(10000)
+            }
+
+            & $UnrealEditorPath "$TempUProjectPath" -run=ResavePackages -allowcommandletrendering -projectonly | Tee-Object -FilePath $LogFile -Append
             if ($LASTEXITCODE -ne 0) { throw "Failed to resave/upgrade packages." }
 
             # --- 5. PACKAGE EXAMPLE PROJECT(S) ---
