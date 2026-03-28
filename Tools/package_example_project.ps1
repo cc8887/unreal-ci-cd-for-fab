@@ -118,19 +118,27 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         }
         
         $ToolchainVersion = switch ($CurrentEngineVersion) {
-            "5.1" { "14.32.31326" } 
-            "5.2" { "14.34.31933" } 
-            "5.3" { "14.36.32532" } 
-            "5.4" { "14.38.33130" } 
-            "5.5" { "14.38.33130" } 
-            "5.6" { "14.38.33130" } 
+            "5.1" { "14.32.31326" }
+            "5.2" { "14.34.31933" }
+            "5.3" { "14.36.32532" }
+            "5.4" { "14.38.33130" }
+            "5.5" { "14.38.33130" }
+            "5.6" { "14.38.33130" }
             default { "Latest" }
         }
+
+        $CompilerXml = ""
+        if ($Config.BuildOptions -and $Config.BuildOptions.PSObject.Properties.Name -contains 'UseClang' -and $Config.BuildOptions.UseClang) {
+            $CompilerXml = "        <Compiler>Clang</Compiler>"
+        } else {
+            $CompilerXml = "        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
+        }
+
         @"
 <?xml version="1.0" encoding="utf-8" ?>
 <Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
     <WindowsPlatform>
-        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>
+$CompilerXml
     </WindowsPlatform>
 </Configuration>
 "@ | Out-File -FilePath $UserBuildConfigPath -Encoding utf8
