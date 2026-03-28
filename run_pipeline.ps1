@@ -144,7 +144,7 @@ try {
                 Write-Host "`n[TASK 1/3] Skipping plugin packaging for $EngineVersion (SkipPluginBuild is true in config)." -ForegroundColor Yellow
             } else {
                 Write-Host "`n[TASK 1/3] Running plugin packaging script for $EngineVersion..." -ForegroundColor Cyan
-                & "$ScriptDir/Tools/package_fast.ps1" -OutputDirectory $FinalOutputDir -EngineVersion $EngineVersion -UseCache:$UseCache -ConfigPath $ConfigPath
+                & "$ScriptDir/Tools/package_plugin.ps1" -OutputDirectory $FinalOutputDir -EngineVersion $EngineVersion -UseCache:$UseCache -ConfigPath $ConfigPath
                 if ($LASTEXITCODE -ne 0) { throw "Plugin packaging failed for $EngineVersion." }
             }
 

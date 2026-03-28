@@ -6,8 +6,8 @@
     (developed in the oldest supported engine version), and for each version in the
     config, it:
     1. Creates a smart copy (excluding .git, build artifacts, etc.)
-    2. Compiles the plugin for the target engine version first (if not excluded).
-    3. Builds the main project C++ to prevent popups.
+    2. Updates the .uplugin engine version.
+    3. Builds the project editor targets (compiles both plugin and project C++ in one step).
     4. Upgrades the project to the target engine version.
     5. Packages C++ and/or Blueprint-only versions directly to the final output directory.
 .NOTES
@@ -118,26 +118,34 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         }
         
         $ToolchainVersion = switch ($CurrentEngineVersion) {
-            "5.1" { "14.32.31326" } 
-            "5.2" { "14.34.31933" } 
-            "5.3" { "14.36.32532" } 
-            "5.4" { "14.38.33130" } 
-            "5.5" { "14.38.33130" } 
-            "5.6" { "14.38.33130" } 
+            "5.1" { "14.32.31326" }
+            "5.2" { "14.34.31933" }
+            "5.3" { "14.36.32532" }
+            "5.4" { "14.38.33130" }
+            "5.5" { "14.38.33130" }
+            "5.6" { "14.38.33130" }
             default { "Latest" }
         }
+
+        $CompilerXml = ""
+        if ($Config.BuildOptions -and $Config.BuildOptions.PSObject.Properties.Name -contains 'UseClang' -and $Config.BuildOptions.UseClang) {
+            $CompilerXml = "        <Compiler>Clang</Compiler>"
+        } else {
+            $CompilerXml = "        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
+        }
+
         @"
 <?xml version="1.0" encoding="utf-8" ?>
 <Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
     <WindowsPlatform>
-        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>
+$CompilerXml
     </WindowsPlatform>
 </Configuration>
 "@ | Out-File -FilePath $UserBuildConfigPath -Encoding utf8
 
         # --- 1. COPY MASTER PROJECT (SMART COPY) ---
         $CurrentStage = "COPY"
-        Write-Host "[1/7] Copying master project..."
+        Write-Host "[1/6] Copying master project..."
         
         $ExcludeDirs = @( ".git", ".vs", ".idea", ".vscode", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", "Platforms", ".claude" )
         $ExcludeFiles = @( "*.sln", "*.suo", "*.VC.db", "*.DotSettings.user", ".vsconfig", "GEMINI.md", ".gitignore", ".gitmodules" )
@@ -156,7 +164,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         # --- 1.5. EXCLUDE OTHER PLUGINS (NEW STEP) ---
         $CurrentStage = "EXCLUDE_PLUGINS"
         if ($Config.ExampleProject.ExcludePluginsFromExample -and $Config.ExampleProject.ExcludePluginsFromExample.Count -gt 0) {
-            Write-Host "[1.5/7] Excluding specified plugins from example project..."
+            Write-Host "[1.5/6] Excluding specified plugins from example project..."
             
             $UProjectJson = Get-Content -Raw -Path $TempUProjectPath | ConvertFrom-Json
             
@@ -185,7 +193,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         # --- 1.6. EXCLUDE SPECIFIED FOLDERS (ROBUST) ---
         $CurrentStage = "EXCLUDE_FOLDERS"
         if ($Config.ExampleProject.ExcludeFolders -and $Config.ExampleProject.ExcludeFolders.Count -gt 0) {
-            Write-Host "[1.6/7] Forcefully removing specified folders from example project..."
+            Write-Host "[1.6/6] Forcefully removing specified folders from example project..."
             foreach ($FolderToExclude in $Config.ExampleProject.ExcludeFolders) {
                 $FolderDirToRemove = Join-Path -Path $TempProjectDir -ChildPath $FolderToExclude
                 if (Test-Path $FolderDirToRemove) {
@@ -197,7 +205,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         
         # --- 2. UPDATE UPLUGIN FILE VERSION ---
         $CurrentStage = "UPDATE_UPLUGIN"
-        Write-Host "[2/7] Updating .uplugin file version for UE $CurrentEngineVersion..."
+        Write-Host "[2/6] Updating .uplugin file version for UE $CurrentEngineVersion..."
         $PluginUpluginPath = Join-Path -Path $TempProjectDir -ChildPath "Plugins\$($Config.PluginName)\$($Config.PluginName).uplugin"
         if (Test-Path $PluginUpluginPath) {
             $PluginJson = Get-Content -Raw -Path $PluginUpluginPath | ConvertFrom-Json
@@ -208,38 +216,16 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
             Write-Host "No .uplugin file found to update." -ForegroundColor Gray
         }
 
-        # --- 3. COMPILE PLUGIN ---
-        $CurrentStage = "COMPILE_PLUGIN"
-        if (-not $Config.ExampleProject.ExcludePlugin) {
-            Write-Host "[3/7] Compiling plugin for UE $CurrentEngineVersion..."
-            
-            $PluginDir = Join-Path -Path $TempProjectDir -ChildPath "Plugins\$($Config.PluginName)"
-            if (-not (Test-Path $PluginUpluginPath)) { throw "Plugin .uplugin file not found at: $PluginUpluginPath" }
-            
-            $RunUATPath = Join-Path -Path $EnginePath -ChildPath "Engine\Build\BatchFiles\RunUAT.bat"
-            & $RunUATPath BuildPlugin -Plugin="$PluginUpluginPath" -Package="$PluginDir\Packages" -TargetPlatforms=Win64 -Rocket | Tee-Object -FilePath $LogFile -Append
-            if ($LASTEXITCODE -ne 0) { throw "Failed to compile plugin for UE $CurrentEngineVersion." }
-        } else {
-            # This condition is now only for the final package, but we still need to compile the plugin for the example to work.
-            Write-Host "[3/7] Compiling plugin for UE $CurrentEngineVersion (required for example project)..."
-            $PluginDir = Join-Path -Path $TempProjectDir -ChildPath "Plugins\$($Config.PluginName)"
-            if (-not (Test-Path $PluginUpluginPath)) { throw "Plugin .uplugin file not found at: $PluginUpluginPath" }
-            
-            $RunUATPath = Join-Path -Path $EnginePath -ChildPath "Engine\Build\BatchFiles\RunUAT.bat"
-            & $RunUATPath BuildPlugin -Plugin="$PluginUpluginPath" -Package="$PluginDir\Packages" -TargetPlatforms=Win64 -Rocket | Tee-Object -FilePath $LogFile -Append
-            if ($LASTEXITCODE -ne 0) { throw "Failed to compile plugin for UE $CurrentEngineVersion." }
-        }
-
-        # --- 4. BUILD PROJECT (to avoid popups) ---
+        # --- 3. BUILD PROJECT & PLUGIN (SINGLE COMPILE STEP) ---
         $CurrentStage = "BUILD_PROJECT"
-        Write-Host "[4/7] Building project editor targets for UE $CurrentEngineVersion..."
+        Write-Host "[3/6] Building project editor targets for UE $CurrentEngineVersion (compiles plugin + project together)..."
         $BuildScriptPath = Join-Path -Path $EnginePath -ChildPath "Engine\Build\BatchFiles\Build.bat"
         & $BuildScriptPath ($MasterProjectName + "Editor") Win64 Development -Project="$TempUProjectPath" | Tee-Object -FilePath $LogFile -Append
         if ($LASTEXITCODE -ne 0) { throw "Failed to build project editor targets for UE $CurrentEngineVersion." }
 
-        # --- 5. UPGRADE PROJECT ---
+        # --- 4. UPGRADE PROJECT ---
         $CurrentStage = "UPGRADE"
-        Write-Host "[5/7] Upgrading project assets for UE $CurrentEngineVersion..."
+        Write-Host "[4/6] Upgrading project assets for UE $CurrentEngineVersion..."
         $UnrealEditorPath = Join-Path -Path $EnginePath -ChildPath "Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 
         $UProjectJson = Get-Content -Raw -Path $TempUProjectPath | ConvertFrom-Json
@@ -249,10 +235,10 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         & $UnrealEditorPath "$TempUProjectPath" -run=ResavePackages -allowcommandletrendering -autocheckout -projectonly | Tee-Object -FilePath $LogFile -Append
         if ($LASTEXITCODE -ne 0) { throw "Failed to resave/upgrade packages." }
 
-        # --- 6. PACKAGE C++ EXAMPLE (OPTIONAL) ---
+        # --- 5. PACKAGE C++ EXAMPLE (OPTIONAL) ---
         $CurrentStage = "PACKAGE_CPP"
         if ($Config.ExampleProject.GenerateCppExample) {
-            Write-Host "[6/7] Packaging C++ Example..."
+            Write-Host "[5/6] Packaging C++ Example..."
             
             "Binaries", "Intermediate", "Saved", ".vs", "DerivedDataCache" | ForEach-Object {
                 $pathToRemove = Join-Path $TempProjectDir $_
@@ -266,28 +252,17 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
                 if (Test-Path $PluginDirToRemove) { Remove-Item -Path $PluginDirToRemove -Recurse -Force }
             }
 
-            # --- Exclude custom folders for CPP packaging ---
-            if ($Config.ExampleProject.ExcludeFolders) {
-                foreach ($Folder in $Config.ExampleProject.ExcludeFolders) {
-                    $PathToRemove = Join-Path -Path $TempProjectDir -ChildPath $Folder
-                    if (Test-Path $PathToRemove) {
-                        Write-Host "Excluding folder for C++ package: $PathToRemove"
-                        Remove-Item -Recurse -Force -Path $PathToRemove
-                    }
-                }
-            }
-            
             $FinalZipPath = Join-Path -Path $FinalOutputDir -ChildPath "$($MasterProjectName)_v$($ProjectVersion)_CPP_UE$($CurrentEngineVersion).zip"
             Compress-Archive -Path "$TempProjectDir\*" -DestinationPath $FinalZipPath -Force
             Write-Host "C++ example created at: $FinalZipPath" -ForegroundColor Green
         } else {
-             Write-Host "[6/7] Skipping C++ example packaging." -ForegroundColor Gray
+             Write-Host "[5/6] Skipping C++ example packaging." -ForegroundColor Gray
         }
 
-        # --- 7. PACKAGE BLUEPRINT EXAMPLE (OPTIONAL) ---
+        # --- 6. PACKAGE BLUEPRINT EXAMPLE (OPTIONAL) ---
         $CurrentStage = "PACKAGE_BP"
         if ($Config.ExampleProject.GenerateBlueprintExample) {
-            Write-Host "[7/7] Creating and packaging Blueprint-only example..."
+            Write-Host "[6/6] Creating and packaging Blueprint-only example..."
             
             "Binaries", "Intermediate", "Saved", ".vs", "DerivedDataCache", "Source" | ForEach-Object {
                 $pathToRemove = Join-Path $TempProjectDir $_ 
@@ -313,17 +288,6 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
                 }
             }
             
-            # --- Exclude custom folders for BP packaging ---
-            if ($Config.ExampleProject.ExcludeFolders) {
-                foreach ($Folder in $Config.ExampleProject.ExcludeFolders) {
-                    $PathToRemove = Join-Path -Path $TempProjectDir -ChildPath $Folder
-                    if (Test-Path $PathToRemove) {
-                        Write-Host "Excluding folder for Blueprint package: $PathToRemove"
-                        Remove-Item -Recurse -Force -Path $PathToRemove
-                    }
-                }
-            }
-
             if ($Config.ExampleProject.BlueprintOnlyExcludeFolders) {
                 foreach ($ExcludeFolder in $Config.ExampleProject.BlueprintOnlyExcludeFolders) {
                     $FolderToRemove = Join-Path -Path $TempProjectDir -ChildPath $ExcludeFolder
@@ -335,7 +299,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
             Compress-Archive -Path "$TempProjectDir\*" -DestinationPath $FinalZipPath -Force
             Write-Host "Blueprint example created at: $FinalZipPath" -ForegroundColor Green
         } else {
-            Write-Host "[7/7] Skipping Blueprint example packaging." -ForegroundColor Gray
+            Write-Host "[6/6] Skipping Blueprint example packaging." -ForegroundColor Gray
         }
 
     } catch {

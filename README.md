@@ -53,6 +53,10 @@ This ensures that users on any supported engine version get an example project t
         * `MSVC v143 - VS 2022 C++ x64/x86 build tools (v14.36-17.6)` - **Required for UE 5.3**
         * `MSVC v143 - VS 2022 C++ x64/x86 build tools (v14.38-17.8)` or newer - **Required for UE 5.4+**
         * `Windows 11 SDK` or `Windows 10 SDK`
+    * **(Optional)** For stricter Clang-based validation (matching Fab's review compiler), also install:
+        * `C++ Clang Compiler for Windows`
+        * `MSBuild support for LLVM (clang-cl) toolset`
+        * Then set `"UseClang": true` in your config's `BuildOptions` section. Note: Clang may not be compatible with older UE versions (5.1-5.3) due to deprecated builtins in engine headers.
 4.  **(Optional) rclone**: For the cloud upload feature, you will need to download [rclone](https://rclone.org/).
 
 ## Quick Start
@@ -135,6 +139,7 @@ Advanced options for controlling the pipeline's behavior.
 
 *   **`FastMode`**: **(Recommended)** If set to `true`, enables a highly optimized build process. It compiles the plugin and example project C++ code together in a single step, drastically reducing build times. If `false`, it uses the original, slower method of compiling the plugin separately before compiling the example project.
 *   **`SkipPluginBuild`**: (Standard Mode Only) If `true`, skips the initial plugin packaging step. Useful for debugging the example project packaging in isolation.
+*   **`UseClang`**: If `true`, uses clang-cl instead of MSVC for compilation. This matches Fab's Clang-based review more closely and catches warnings like `-Wshadow` that MSVC misses. Requires the Clang VS components (see Prerequisites). May not work with UE 5.1-5.3 due to engine header incompatibilities.
 
 ### 2. (Optional) Configure Cloud Uploads
 
@@ -213,7 +218,9 @@ It's a command-line program for managing files on cloud storage. It's a single e
 
 > [!IMPORTANT]
 > **Global Build Configuration (`BuildConfiguration.xml`)**
-> To ensure the correct Visual Studio toolchain is used for each engine version, the `package_fast.ps1` script temporarily modifies the global `BuildConfiguration.xml` file located in `Documents/Unreal Engine/UnrealBuildTool`.
+> To ensure the correct Visual Studio toolchain is used for each engine version, the `package_plugin.ps1` script temporarily modifies the global `BuildConfiguration.xml` file located in `Documents/Unreal Engine/UnrealBuildTool`.
+>
+> The pipeline supports an optional **clang-cl** mode (`"UseClang": true` in config) that uses Clang instead of MSVC for compilation. This can help catch issues that Fab's Clang-based review (Mac and Windows ARM64) would reject, such as `-Wshadow` warnings. However, Clang may not be compatible with older UE versions (5.1-5.3) due to deprecated builtins in engine headers. When `UseClang` is not set, the pipeline uses MSVC with version-pinned toolchains.
 >
 > The script creates a backup and is designed to restore it, even if the build fails. However, if the script is terminated abruptly (e.g., by a system crash or forced shutdown), the backup may not be restored. This could potentially affect other Unreal Engine projects on your system.
 >

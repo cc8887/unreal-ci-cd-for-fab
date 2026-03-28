@@ -136,15 +136,24 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
             "5.2" { "14.34.31933" } # VS 2022 v17.4
             "5.3" { "14.36.32532" } # VS 2022 v17.6
             "5.4" { "14.38.33130" } # VS 2022 v17.8
-            "5.5" { "14.38.33130" } # VS 2022 v17.10  
+            "5.5" { "14.38.33130" } # VS 2022 v17.10
             "5.6" { "14.38.33130" } # VS 2022 v17.10 or later #14.40.33807
             default { "Latest" }
         }
+
+        # Build the compiler configuration XML
+        $CompilerXml = ""
+        if ($Config.BuildOptions -and $Config.BuildOptions.PSObject.Properties.Name -contains 'UseClang' -and $Config.BuildOptions.UseClang) {
+            $CompilerXml = "        <Compiler>Clang</Compiler>"
+        } else {
+            $CompilerXml = "        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
+        }
+
         @"
 <?xml version="1.0" encoding="utf-8" ?>
 <Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
     <WindowsPlatform>
-        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>
+$CompilerXml
     </WindowsPlatform>
 </Configuration>
 "@ | Out-File -FilePath $UserBuildConfigPath -Encoding utf8
