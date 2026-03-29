@@ -159,7 +159,7 @@ $CompilerXml
         $CurrentStage = "COPY"
         Write-Host "[1/5] Copying master project..."
         
-        $ExcludeDirs = @( ".git", ".vs", ".idea", ".vscode", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", "Platforms" )
+        $ExcludeDirs = @( ".git", ".vs", ".idea", ".vscode", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", "Platforms", ".Claude" )
         $ExcludeFiles = @( "*.sln", "*.suo", "*.VC.db", "*.DotSettings.user", ".vsconfig", "GEMINI.md", ".gitignore", ".gitmodules" )
         if ($Config.ExampleProject.ExcludeFiles) {
             $ExcludeFiles += $Config.ExampleProject.ExcludeFiles
@@ -214,7 +214,7 @@ $CompilerXml
         
         $PluginRootInStage = Join-Path -Path $TempPluginStageDir -ChildPath $Config.PluginName
         
-        $ExcludePluginCopyDirs = @( ".git", ".github", ".vs", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", ".vscode", ".idea", "Packages" )
+        $ExcludePluginCopyDirs = @( ".git", ".github", ".vs", "Binaries", "Build", "Intermediate", "Saved", "DerivedDataCache", "__pycache__", ".vscode", ".idea", "Packages", ".Claude" )
         $ExcludePluginCopyFiles = @( "LICENSE", "LICENSE.md" )
         robocopy $Config.PluginSourceDirectory $PluginRootInStage /E /XD $ExcludePluginCopyDirs /XF $ExcludePluginCopyFiles /NFL /NDL /NJH /NJS /nc /ns /np
         if ($LASTEXITCODE -gt 7) { throw "Failed to copy plugin source for zipping." }
