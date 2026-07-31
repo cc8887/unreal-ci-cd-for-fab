@@ -28,6 +28,9 @@ param (
     [switch]$UseCache,
 
     [Parameter(Mandatory=$false)]
+    [switch]$ContinueOnError,
+
+    [Parameter(Mandatory=$false)]
     [string]$ConfigPath = "config.json"
 )
 
@@ -61,6 +64,8 @@ if (-not $SkipValidation) {
 $Config = Get-Content -Raw -Path $ConfigPath | ConvertFrom-Json
 
 $GlobalSuccess = $true
+$BuildResults = @()
+$TotalEngineVersions = @($Config.EngineVersions).Count
 
 # Define final and temporary directories
 $FinalOutputDir = Join-Path -Path $ScriptDir -ChildPath $Config.OutputDirectory
@@ -134,10 +139,16 @@ try {
     } else {
         Write-Host "`n[INFO] Running in Standard Mode. Using sequential packaging scripts." -ForegroundColor Yellow
         # --- Loop through each engine version and run tasks sequentially ---
+        $EngineIndex = 0
         foreach ($EngineVersion in $Config.EngineVersions) {
+            $EngineIndex++
+            $VersionStart = Get-Date
             Write-Host "`n=================================================================" -ForegroundColor DarkCyan
-            Write-Host " PROCESSING ENGINE VERSION: $EngineVersion" -ForegroundColor DarkCyan
+            Write-Host " [VERSION $EngineIndex/$TotalEngineVersions] ENTER UE $EngineVersion" -ForegroundColor DarkCyan
             Write-Host "================================================================="
+
+            $VersionSuccess = $true
+            $FailureReason = ""
 
             # --- 1. PACKAGE PLUGIN ---
             if ($Config.BuildOptions -and $Config.BuildOptions.SkipPluginBuild) {
@@ -145,16 +156,40 @@ try {
             } else {
                 Write-Host "`n[TASK 1/3] Running plugin packaging script for $EngineVersion..." -ForegroundColor Cyan
                 & "$ScriptDir/Tools/package_plugin.ps1" -OutputDirectory $FinalOutputDir -EngineVersion $EngineVersion -UseCache:$UseCache -ConfigPath $ConfigPath
-                if ($LASTEXITCODE -ne 0) { throw "Plugin packaging failed for $EngineVersion." }
+                if ($LASTEXITCODE -ne 0) {
+                    $VersionSuccess = $false
+                    $FailureReason = "Plugin packaging failed"
+                }
             }
 
             # --- 2. PACKAGE EXAMPLE PROJECTS ---
-            if ($Config.ExampleProject -and $Config.ExampleProject.Generate) {
+            if ($VersionSuccess -and $Config.ExampleProject -and $Config.ExampleProject.Generate) {
                 Write-Host "`n[TASK 2/3] Running example project packaging script for $EngineVersion..." -ForegroundColor Cyan
                 & "$ScriptDir/Tools/package_example_project.ps1" -OutputDirectory $TempStagingDir -FinalOutputDir $FinalOutputDir -EngineVersion $EngineVersion -UseCache:$UseCache -ConfigPath $ConfigPath
-                if ($LASTEXITCODE -ne 0) { throw "Example project packaging failed for $EngineVersion." }
-            } else {
+                if ($LASTEXITCODE -ne 0) {
+                    $VersionSuccess = $false
+                    $FailureReason = "Example project packaging failed"
+                }
+            } elseif (-not ($Config.ExampleProject -and $Config.ExampleProject.Generate)) {
                 Write-Host "`n[TASK 2/3] Skipping example project generation for $EngineVersion (disabled in config)." -ForegroundColor Yellow
+            }
+
+            $Duration = [math]::Round(((Get-Date) - $VersionStart).TotalSeconds, 1)
+            $BuildResults += [pscustomobject]@{
+                EngineVersion = $EngineVersion
+                Success = $VersionSuccess
+                DurationSeconds = $Duration
+                Reason = $FailureReason
+            }
+
+            if ($VersionSuccess) {
+                Write-Host "[VERSION $EngineIndex/$TotalEngineVersions] LEAVE UE $EngineVersion - SUCCESS (${Duration}s)" -ForegroundColor Green
+            } else {
+                $GlobalSuccess = $false
+                Write-Host "[VERSION $EngineIndex/$TotalEngineVersions] LEAVE UE $EngineVersion - FAILED (${Duration}s): $FailureReason" -ForegroundColor Red
+                if (-not $ContinueOnError) {
+                    throw "$FailureReason for $EngineVersion. Use -ContinueOnError to build remaining versions."
+                }
             }
         }
     }
@@ -182,17 +217,16 @@ try {
     }
 
     Write-Host "`n================================================================="
+    if ($BuildResults.Count -gt 0) {
+        Write-Host " VERSION BUILD SUMMARY" -ForegroundColor Cyan
+        $BuildResults | Format-Table EngineVersion, Success, DurationSeconds, Reason -AutoSize | Out-Host
+    }
     if ($GlobalSuccess) {
         Write-Host " MASTER PIPELINE COMPLETED SUCCESSFULLY!" -ForegroundColor Green
     } else {
         Write-Host " One or more tasks in the master pipeline FAILED." -ForegroundColor Red
     }
     Write-Host "================================================================="
-}
-
-# Only prompt for input if running interactively (not called from another script)
-if ($Host.Name -eq "ConsoleHost") {
-    Read-Host "Press Enter to exit"
 }
 
 # Exit with appropriate code

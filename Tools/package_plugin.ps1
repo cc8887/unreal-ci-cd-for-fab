@@ -68,12 +68,6 @@ Write-Host "================================================================="
 Write-Host "Plugin: $($Config.PluginName) v$($PluginVersion)"
 Write-Host "Outputting to: $OutputBuildsDir"
 
-# Define path for the GLOBAL BuildConfiguration.xml
-$UserBuildConfigDir = Join-Path -Path $HOME -ChildPath "Documents/Unreal Engine/UnrealBuildTool"
-$UserBuildConfigPath = Join-Path -Path $UserBuildConfigDir -ChildPath "BuildConfiguration.xml"
-$UserBuildConfigBackupPath = Join-Path -Path $UserBuildConfigDir -ChildPath "BuildConfiguration.xml.bak"
-
-
 # Determine which engine versions to process
 $VersionsToProcess = if (-not [string]::IsNullOrEmpty($EngineVersion)) { @($EngineVersion) } else { $Config.EngineVersions }
 
@@ -93,8 +87,15 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
     
     if (-not $EnginePath) {
         Write-Error "Could not find UE_$CurrentEngineVersion in any of the configured base paths."
+        $GlobalSuccess = $false
         continue
     }
+
+    # Use the engine-local UBT configuration so different engine versions can build concurrently.
+    $EngineBuildConfigDir = Join-Path -Path $EnginePath -ChildPath "Engine/Saved/UnrealBuildTool"
+    $EngineBuildConfigPath = Join-Path -Path $EngineBuildConfigDir -ChildPath "BuildConfiguration.xml"
+    $EngineBuildConfigBackupPath = Join-Path -Path $EngineBuildConfigDir -ChildPath "BuildConfiguration.xml.fabbuild.bak"
+    $EngineConfigLock = $null
 
     $LogFile = Join-Path -Path $LogsDir -ChildPath "BuildLog_UE_${CurrentEngineVersion}_$Timestamp.txt"
 
@@ -125,20 +126,31 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         if (Test-Path $TempDir) { Remove-Item -Recurse -Force -Path $TempDir }
         New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
 
-        New-Item -Path $UserBuildConfigDir -ItemType Directory -Force | Out-Null
-        if (Test-Path $UserBuildConfigPath) {
-            Rename-Item -Path $UserBuildConfigPath -NewName "BuildConfiguration.xml.bak" -Force
+        # Serialize builds targeting the same engine installation while allowing
+        # different engine versions to run concurrently.
+        $LockName = "Global\FabBuild_UE_$($CurrentEngineVersion.Replace('.', '_'))_$([Math]::Abs($EnginePath.ToLowerInvariant().GetHashCode()))"
+        $EngineConfigLock = New-Object System.Threading.Mutex($false, $LockName)
+        if (-not $EngineConfigLock.WaitOne([TimeSpan]::FromMinutes(30))) {
+            throw "Timed out waiting for engine configuration lock '$LockName'."
+        }
+
+        New-Item -Path $EngineBuildConfigDir -ItemType Directory -Force | Out-Null
+        if (Test-Path $EngineBuildConfigBackupPath) {
+            throw "Stale engine configuration backup exists at '$EngineBuildConfigBackupPath'. Restore or remove it before building."
+        }
+        if (Test-Path $EngineBuildConfigPath) {
+            Move-Item -Path $EngineBuildConfigPath -Destination $EngineBuildConfigBackupPath -Force
         }
         
-        # Updated Toolchain versions based on Epic's recommendations
+        # Pin each engine to its supported Visual Studio 2022 toolchain.
         $ToolchainVersion = switch ($CurrentEngineVersion) {
-            "5.1" { "14.32.31326" } # VS 2022 v17.2
-            "5.2" { "14.34.31933" } # VS 2022 v17.4
-            "5.3" { "14.36.32532" } # VS 2022 v17.6
-            "5.4" { "14.38.33130" } # VS 2022 v17.8
-            "5.5" { "14.38.33130" } # VS 2022 v17.10
-            "5.6" { "14.38.33130" } # VS 2022 v17.10 or later #14.40.33807
-            default { "Latest" }
+            "5.1" { "14.32.31326" }
+            "5.2" { "14.34.31933" }
+            "5.3" { "14.36.32532" }
+            "5.4" { "14.38.33130" }
+            "5.5" { "14.38.33130" }
+            "5.6" { "14.38.33130" }
+            default { "14.44.35222" }
         }
 
         # Build the compiler configuration XML
@@ -156,7 +168,8 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
 $CompilerXml
     </WindowsPlatform>
 </Configuration>
-"@ | Out-File -FilePath $UserBuildConfigPath -Encoding utf8
+"@ | Out-File -FilePath $EngineBuildConfigPath -Encoding utf8
+        Write-Host "Using isolated UBT config: $EngineBuildConfigPath" -ForegroundColor DarkGray
 
         if (-not (Test-Path $EnginePath)) {
             throw "[SKIP] Engine not found at '$EnginePath'"
@@ -164,41 +177,27 @@ $CompilerXml
 
         # --- 2. SETUP & BUILD HOST PROJECT ---
         $CurrentStage = "BUILD"
-        Write-Host "[2/3] [BUILD] Compiling plugin using temporary host project..."
-        New-Item -Path $HostProjectDir -ItemType Directory -Force | Out-Null
-        $HostUprojectPath = Join-Path -Path $HostProjectDir -ChildPath "HostProject.uproject"
-        @{ FileVersion = 3; EngineAssociation = $EngineVersion; Category = ""; Description = ""; Plugins = @(@{ Name = $Config.PluginName; Enabled = $true }) } | ConvertTo-Json -Depth 5 | Out-File -FilePath $HostUprojectPath -Encoding utf8
-        $HostPluginDir = Join-Path -Path $HostProjectDir -ChildPath "Plugins/$($Config.PluginName)"
-        
-        # Smart copy of plugin source (excluding build artifacts and VCS)
-        $ExcludeDirs = @(
-            ".git",
-            ".vs", 
-            "Binaries",
-            "Build", 
-            "Intermediate",
-            "Saved",
-            "DerivedDataCache",
-            "__pycache__",
-            ".vscode",
-            ".idea",
-            "Packages"
-        )
-        
-        # Use Robocopy for efficient copying with exclusions
-        Write-Host "Copying plugin source (excluding build artifacts)..."
-        robocopy $Config.PluginSourceDirectory $HostPluginDir /E /XD $ExcludeDirs /NFL /NDL /NJH /NJS /nc /ns /np
-        # Note: Robocopy exit codes 0-7 are success, 8+ are errors
-        if ($LASTEXITCODE -gt 7) { 
-            throw "Failed to copy plugin source. Robocopy exit code: $LASTEXITCODE" 
+        Write-Host "[2/3] [BUILD] Generating standardized temporary host project..."
+        $BuildId = "ue$($CurrentEngineVersion)-$PID-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+        $HostProject = & "$ScriptDir/new_host_project.ps1" `
+            -EngineVersion $CurrentEngineVersion `
+            -PluginName $Config.PluginName `
+            -PluginSourceDirectory $Config.PluginSourceDirectory `
+            -OutputDirectory $HostProjectDir `
+            -CompilerVersion $ToolchainVersion `
+            -BuildId $BuildId `
+            -Force
+        if ($LASTEXITCODE -ne 0 -or -not $HostProject) {
+            throw "Host project generation failed for UE $CurrentEngineVersion."
         }
-        
-        $HostUpluginPath = Join-Path -Path $HostPluginDir -ChildPath "$($Config.PluginName).uplugin"
-        $UpluginJson = Get-Content -Raw -Path $HostUpluginPath | ConvertFrom-Json
-        $UpluginJson.EngineVersion = "$($CurrentEngineVersion).0"
-        $UpluginJson | ConvertTo-Json -Depth 5 | Out-File -FilePath $HostUpluginPath -Encoding utf8
+        $HostUprojectPath = $HostProject.ProjectFile
+        $HostPluginDir = $HostProject.PluginDirectory
+        $HostUpluginPath = $HostProject.PluginDescriptor
+        Write-Host "Generated host project: $HostUprojectPath" -ForegroundColor DarkGray
+        Write-Host "Build metadata: $($HostProject.MetadataFile)" -ForegroundColor DarkGray
+        Write-Host "Compiling plugin using generated host project..."
 
-        # FIX: Restore Tee-Object to show live build log in console AND save to file.
+        # Show live build output and save the same stream to the version log.
         & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" BuildPlugin -Plugin="$HostUpluginPath" -Package="$PackageOutputDir" -TargetPlatforms=Win64 -Rocket *>&1 | Tee-Object -FilePath $LogFile -Append
         if ($LASTEXITCODE -ne 0) { throw "Packaging failed. Check the log file." }
         Write-Host "Build process completed successfully."
@@ -263,11 +262,17 @@ $CompilerXml
         Write-Host "Cleaning up temporary files for UE $CurrentEngineVersion..."
         if (Test-Path $TempDir) { Remove-Item -Recurse -Force -Path $TempDir }
         
-        if (Test-Path $UserBuildConfigPath) { Remove-Item -Path $UserBuildConfigPath -Force }
-        if (Test-Path $UserBuildConfigBackupPath) {
-            Rename-Item -Path $UserBuildConfigBackupPath -NewName "BuildConfiguration.xml" -Force
+        if (Test-Path $EngineBuildConfigPath) { Remove-Item -Path $EngineBuildConfigPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $EngineBuildConfigBackupPath) {
+            Move-Item -Path $EngineBuildConfigBackupPath -Destination $EngineBuildConfigPath -Force
+        }
+        if ($EngineConfigLock) {
+            try { $EngineConfigLock.ReleaseMutex() } catch { }
+            $EngineConfigLock.Dispose()
         }
     }
 }
 
+# Propagate build failures to callers and CI systems.
+exit $(if ($GlobalSuccess) { 0 } else { 1 })
 

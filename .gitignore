@@ -24,12 +24,13 @@ Saved/
 # Ignore the generated template project
 /TemplateProject/
 
-# Ignore the output directories
+# Ignore the output directories and generated host projects
 /Builds_*/
 /Build*/
 /ExampleProjectBuild_*/
 /Logs/
 /.tmp/
+/.host-projects/
 
 # Ignore user configuration files, but not the example
 config*.json

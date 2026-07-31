@@ -183,6 +183,29 @@ Once configured, run the master script from a PowerShell terminal in the root of
 
 The script will execute all configured tasks, creating plugin packages and version-specific example projects in your configured output folder (e.g., `Builds/`).
 
+### Generate a Host Project Directly
+
+`Tools/new_host_project.ps1` creates a deterministic, disposable Unreal project for one plugin and engine version. Generated projects are build inputs, not source files, and should not be committed.
+
+```powershell
+.\Tools\new_host_project.ps1 `
+  -EngineVersion "5.6" `
+  -PluginName "BlueprintLisp" `
+  -PluginSourceDirectory "G:\Github\Blueprint2DSL" `
+  -OutputDirectory ".\.host-projects\UE_5.6" `
+  -CompilerVersion "14.38.33130" `
+  -Force
+```
+
+The generator creates:
+
+* `<ProjectName>.uproject` with the requested engine association.
+* `Plugins/<PluginName>/` as a clean plugin source copy.
+* A version-pinned `.uplugin` copy.
+* `.fabbuild/host-project.json` containing machine-readable build metadata.
+
+Running the same command with `-Force` replaces the output deterministically. The packaging pipeline uses this generator rather than maintaining separate UE-version projects in source control.
+
 ## Features
 
 * **Modular & Config-Driven**: A master script (`run_pipeline.ps1`) orchestrates the entire process based on settings in a single `config.json` file.
