@@ -187,7 +187,7 @@ $CompilerXml
             -CompilerVersion $ToolchainVersion `
             -BuildId $BuildId `
             -Force
-        if ($LASTEXITCODE -ne 0 -or -not $HostProject) {
+        if (-not $HostProject -or -not (Test-Path -LiteralPath $HostProject.ProjectFile) -or -not (Test-Path -LiteralPath $HostProject.PluginDescriptor)) {
             throw "Host project generation failed for UE $CurrentEngineVersion."
         }
         $HostUprojectPath = $HostProject.ProjectFile
@@ -260,7 +260,20 @@ $CompilerXml
     } finally {
         # --- Cleanup ---
         Write-Host "Cleaning up temporary files for UE $CurrentEngineVersion..."
-        if (Test-Path $TempDir) { Remove-Item -Recurse -Force -Path $TempDir }
+        if (Test-Path $TempDir) {
+            for ($CleanupAttempt = 1; $CleanupAttempt -le 5; $CleanupAttempt++) {
+                try {
+                    Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction Stop
+                    break
+                } catch {
+                    if ($CleanupAttempt -eq 5) {
+                        Write-Warning "Could not fully remove temporary directory '$TempDir': $($_.Exception.Message)"
+                    } else {
+                        Start-Sleep -Milliseconds (250 * $CleanupAttempt)
+                    }
+                }
+            }
+        }
         
         if (Test-Path $EngineBuildConfigPath) { Remove-Item -Path $EngineBuildConfigPath -Force -ErrorAction SilentlyContinue }
         if (Test-Path $EngineBuildConfigBackupPath) {

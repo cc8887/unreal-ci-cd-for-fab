@@ -167,3 +167,4 @@ $Result = [pscustomobject]@{
 }
 
 Write-Output $Result
+$global:LASTEXITCODE = 0
