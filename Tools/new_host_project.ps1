@@ -10,7 +10,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$true)]
-    [ValidatePattern('^5\.\d+$')]
+    [ValidatePattern('^(4[.]27|5[.][0-9]+)$')]
     [string]$EngineVersion,
 
     [Parameter(Mandatory=$true)]

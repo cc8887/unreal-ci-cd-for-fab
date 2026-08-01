@@ -131,7 +131,8 @@ if (-not $SkipEngineValidation) {
             $FoundEngine = $false
             foreach ($BasePath in $EngineBasePaths) {
                 $EnginePath = Join-Path -Path $BasePath -ChildPath "UE_$Version"
-                $EngineExe = Join-Path -Path $EnginePath -ChildPath "Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+                $EditorCommandName = if ([version]$Version -lt [version]'5.0') { 'UE4Editor-Cmd.exe' } else { 'UnrealEditor-Cmd.exe' }
+                $EngineExe = Join-Path -Path $EnginePath -ChildPath "Engine/Binaries/Win64/$EditorCommandName"
                 
                 if (Test-Path $EngineExe) {
                     Test-ValidationSuccess "Unreal Engine $Version found at '$EnginePath'"

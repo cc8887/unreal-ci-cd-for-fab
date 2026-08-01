@@ -142,8 +142,10 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
             Move-Item -Path $EngineBuildConfigPath -Destination $EngineBuildConfigBackupPath -Force
         }
         
-        # Pin each engine to its supported Visual Studio 2022 toolchain.
+        # Pin each engine to a supported MSVC toolchain. UE 4.27 uses the
+        # VS 2022-compatible 14.32 toolchain when the 4.27-plus launcher build is installed.
         $ToolchainVersion = switch ($CurrentEngineVersion) {
+            "4.27" { "14.32.31326" }
             "5.1" { "14.32.31326" }
             "5.2" { "14.34.31933" }
             "5.3" { "14.36.32532" }
