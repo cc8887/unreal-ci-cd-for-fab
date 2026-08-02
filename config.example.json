@@ -1,6 +1,7 @@
 {
   "PluginName": "YourPluginName",
   "PluginSourceDirectory": "C:/Path/To/Your/PluginSource",
+  "BuildPluginDependencies": [],
   "OutputDirectory": "./Builds",
   "UnrealEngineBasePath": [
     "C:/Program Files/Epic Games",

@@ -51,10 +51,10 @@ $PluginInfo = Get-Content -Raw -Path $SourceUpluginPath | ConvertFrom-Json
 $PluginVersion = $PluginInfo.VersionName
 
 # --- Create output directory ---
+$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 if ($OutputDirectory) {
     $OutputBuildsDir = $OutputDirectory
 } else {
-    $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $OutputBuildsDir = Join-Path -Path $ProjectRoot -ChildPath "$($Config.OutputDirectory)_$Timestamp"
 }
 $LogsDir = Join-Path -Path $ProjectRoot -ChildPath "Logs"
@@ -91,11 +91,13 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         continue
     }
 
-    # Use the engine-local UBT configuration so different engine versions can build concurrently.
-    $EngineBuildConfigDir = Join-Path -Path $EnginePath -ChildPath "Engine/Saved/UnrealBuildTool"
-    $EngineBuildConfigPath = Join-Path -Path $EngineBuildConfigDir -ChildPath "BuildConfiguration.xml"
-    $EngineBuildConfigBackupPath = Join-Path -Path $EngineBuildConfigDir -ChildPath "BuildConfiguration.xml.fabbuild.bak"
+    # Launcher UBT reads the per-user AppData config and ignores Engine/Saved.
+    # Serialize access, back up the original, and restore it in finally.
+    $EngineBuildConfigDir = Join-Path -Path $env:APPDATA -ChildPath 'Unreal Engine/UnrealBuildTool'
+    $EngineBuildConfigPath = Join-Path -Path $EngineBuildConfigDir -ChildPath 'BuildConfiguration.xml'
+    $EngineBuildConfigBackupPath = $null
     $EngineConfigLock = $null
+    $TemporaryDependencyDirs = @()
 
     $LogFile = Join-Path -Path $LogsDir -ChildPath "BuildLog_UE_${CurrentEngineVersion}_$Timestamp.txt"
 
@@ -126,33 +128,46 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         if (Test-Path $TempDir) { Remove-Item -Recurse -Force -Path $TempDir }
         New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
 
-        # Serialize builds targeting the same engine installation while allowing
-        # different engine versions to run concurrently.
-        $LockName = "Global\FabBuild_UE_$($CurrentEngineVersion.Replace('.', '_'))_$([Math]::Abs($EnginePath.ToLowerInvariant().GetHashCode()))"
+        # Pin each engine to a supported installed MSVC toolchain.
+        $RequestedToolchainVersion = switch ($CurrentEngineVersion) {
+            "4.27" { "14.32" }
+            "5.1" { "14.32" }
+            "5.2" { "14.34" }
+            "5.3" { "14.36" }
+            "5.4" { "14.38" }
+            "5.5" { "14.38" }
+            "5.6" { "14.44" }
+            "5.7" { "14.44" }
+            "5.8" { "14.44" }
+            default { throw "No supported MSVC toolchain mapping is defined for UE $CurrentEngineVersion." }
+        }
+        $MsvcRoots = @(
+            "$env:ProgramFiles/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",
+            "$env:ProgramFiles/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC",
+            "$env:ProgramFiles/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC",
+            "${env:ProgramFiles(x86)}/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC"
+        )
+        $InstalledToolchains = @($MsvcRoots | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object {
+            Get-ChildItem -LiteralPath $_ -Directory | ForEach-Object { $_.Name }
+        } | Where-Object { $_ -like "$RequestedToolchainVersion.*" } | Sort-Object { [version]$_ } -Descending -Unique)
+        if ($InstalledToolchains.Count -eq 0) {
+            throw "Requested MSVC $RequestedToolchainVersion for UE $CurrentEngineVersion is not installed."
+        }
+        $ToolchainVersion = $InstalledToolchains[0]
+        Write-Host "MSVC toolchain requested=$RequestedToolchainVersion selected=$ToolchainVersion" -ForegroundColor Cyan
+
+        $LockName = 'Global\FabBuild_UBT_UserConfig'
         $EngineConfigLock = New-Object System.Threading.Mutex($false, $LockName)
         if (-not $EngineConfigLock.WaitOne([TimeSpan]::FromMinutes(30))) {
-            throw "Timed out waiting for engine configuration lock '$LockName'."
+            throw "Timed out waiting for UBT user configuration lock '$LockName'."
         }
-
+        $EngineBuildConfigBackupPath = "$EngineBuildConfigPath.fabbuild.$PID.bak"
         New-Item -Path $EngineBuildConfigDir -ItemType Directory -Force | Out-Null
-        if (Test-Path $EngineBuildConfigBackupPath) {
-            throw "Stale engine configuration backup exists at '$EngineBuildConfigBackupPath'. Restore or remove it before building."
+        if (Test-Path -LiteralPath $EngineBuildConfigBackupPath) {
+            throw "Stale UBT configuration backup exists at '$EngineBuildConfigBackupPath'."
         }
-        if (Test-Path $EngineBuildConfigPath) {
-            Move-Item -Path $EngineBuildConfigPath -Destination $EngineBuildConfigBackupPath -Force
-        }
-        
-        # Pin each engine to a supported MSVC toolchain. UE 4.27 uses the
-        # VS 2022-compatible 14.32 toolchain when the 4.27-plus launcher build is installed.
-        $ToolchainVersion = switch ($CurrentEngineVersion) {
-            "4.27" { "14.32.31326" }
-            "5.1" { "14.32.31326" }
-            "5.2" { "14.34.31933" }
-            "5.3" { "14.36.32532" }
-            "5.4" { "14.38.33130" }
-            "5.5" { "14.38.33130" }
-            "5.6" { "14.38.33130" }
-            default { "14.44.35222" }
+        if (Test-Path -LiteralPath $EngineBuildConfigPath) {
+            Move-Item -LiteralPath $EngineBuildConfigPath -Destination $EngineBuildConfigBackupPath -Force
         }
 
         # Build the compiler configuration XML
@@ -160,7 +175,7 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         if ($Config.BuildOptions -and $Config.BuildOptions.PSObject.Properties.Name -contains 'UseClang' -and $Config.BuildOptions.UseClang) {
             $CompilerXml = "        <Compiler>Clang</Compiler>"
         } else {
-            $CompilerXml = "        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
+            $CompilerXml = "        <Compiler>VisualStudio2022</Compiler>`r`n        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
         }
 
         @"
@@ -181,14 +196,27 @@ $CompilerXml
         $CurrentStage = "BUILD"
         Write-Host "[2/3] [BUILD] Generating standardized temporary host project..."
         $BuildId = "ue$($CurrentEngineVersion)-$PID-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
-        $HostProject = & "$ScriptDir/new_host_project.ps1" `
-            -EngineVersion $CurrentEngineVersion `
-            -PluginName $Config.PluginName `
-            -PluginSourceDirectory $Config.PluginSourceDirectory `
-            -OutputDirectory $HostProjectDir `
-            -CompilerVersion $ToolchainVersion `
-            -BuildId $BuildId `
-            -Force
+        $DependenciesJsonPath = Join-Path -Path $TempDir -ChildPath 'build-plugin-dependencies.json'
+        $BuildPluginDependencies = @()
+        if ($Config.PSObject.Properties.Name -contains 'BuildPluginDependencies') {
+            $BuildPluginDependencies = @($Config.BuildPluginDependencies)
+        }
+        Write-Host "Build plugin dependency count: $($BuildPluginDependencies.Count)" -ForegroundColor DarkGray
+        ConvertTo-Json -InputObject $BuildPluginDependencies -Depth 8 | Set-Content -LiteralPath $DependenciesJsonPath -Encoding UTF8
+        $HostProjectArguments = @{
+            EngineVersion = $CurrentEngineVersion
+            EnginePath = $EnginePath
+            PluginName = $Config.PluginName
+            PluginSourceDirectory = $Config.PluginSourceDirectory
+            OutputDirectory = $HostProjectDir
+            CompilerVersion = $ToolchainVersion
+            BuildId = $BuildId
+            Force = $true
+        }
+        if ($BuildPluginDependencies.Count -gt 0) {
+            $HostProjectArguments.DependenciesJsonPath = $DependenciesJsonPath
+        }
+        $HostProject = & "$ScriptDir/new_host_project.ps1" @HostProjectArguments
         if (-not $HostProject -or -not (Test-Path -LiteralPath $HostProject.ProjectFile) -or -not (Test-Path -LiteralPath $HostProject.PluginDescriptor)) {
             throw "Host project generation failed for UE $CurrentEngineVersion."
         }
@@ -197,10 +225,68 @@ $CompilerXml
         $HostUpluginPath = $HostProject.PluginDescriptor
         Write-Host "Generated host project: $HostUprojectPath" -ForegroundColor DarkGray
         Write-Host "Build metadata: $($HostProject.MetadataFile)" -ForegroundColor DarkGray
-        Write-Host "Compiling plugin using generated host project..."
 
-        # Show live build output and save the same stream to the version log.
-        & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" BuildPlugin -Plugin="$HostUpluginPath" -Package="$PackageOutputDir" -TargetPlatforms=Win64 -Rocket *>&1 | Tee-Object -FilePath $LogFile -Append
+        if ($BuildPluginDependencies.Count -gt 0) {
+            $MarketplacePluginsDir = Join-Path -Path $EnginePath -ChildPath 'Engine/Plugins/Marketplace'
+            $DependencyBuildRoot = Join-Path -Path $TempDir -ChildPath 'Dependencies'
+            $DependencyBuildPlans = @()
+
+            # Refuse all existing destinations before starting any dependency build.
+            foreach ($Dependency in $BuildPluginDependencies) {
+                $DependencyName = [string]$Dependency.Name
+                if ([string]::IsNullOrWhiteSpace($DependencyName)) {
+                    throw "BuildPluginDependencies contains an entry without a Name."
+                }
+                if ($DependencyName -notmatch '^[A-Za-z0-9_.-]+$') {
+                    throw "Build dependency name '$DependencyName' contains characters that are unsafe for a temporary directory name."
+                }
+                $HostDependencyDir = Join-Path -Path $HostProjectDir -ChildPath "Plugins/$DependencyName"
+                $HostDependencyDescriptor = Join-Path -Path $HostDependencyDir -ChildPath "$DependencyName.uplugin"
+                if (-not (Test-Path -LiteralPath $HostDependencyDescriptor -PathType Leaf)) {
+                    throw "Versioned host dependency descriptor '$HostDependencyDescriptor' was not found."
+                }
+                $TemporaryDependencyDir = Join-Path -Path $MarketplacePluginsDir -ChildPath $DependencyName
+                if (Test-Path -LiteralPath $TemporaryDependencyDir) {
+                    throw "Build dependency destination already exists at '$TemporaryDependencyDir'. Refusing to overwrite or remove it; handle the existing engine plugin directory before retrying."
+                }
+                $DependencyBuildPlans += [pscustomobject]@{
+                    Name = $DependencyName
+                    Descriptor = $HostDependencyDescriptor
+                    PackageDirectory = (Join-Path -Path $DependencyBuildRoot -ChildPath $DependencyName)
+                    ExposedDirectory = $TemporaryDependencyDir
+                }
+            }
+
+            foreach ($DependencyBuildPlan in $DependencyBuildPlans) {
+                $DependencyName = $DependencyBuildPlan.Name
+                Write-Host "[DEPENDENCY BUILD START] $DependencyName" -ForegroundColor Cyan
+                $DependencyBuildArguments = @('BuildPlugin', "-Plugin=$($DependencyBuildPlan.Descriptor)", "-Package=$($DependencyBuildPlan.PackageDirectory)", '-TargetPlatforms=Win64', '-Rocket')
+                & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" @DependencyBuildArguments *>&1 | Tee-Object -FilePath $LogFile -Append
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Dependency build failed for '$DependencyName'. Main plugin build was not started. Check '$LogFile'."
+                }
+                $PackagedDependencyDescriptor = Join-Path -Path $DependencyBuildPlan.PackageDirectory -ChildPath "$DependencyName.uplugin"
+                if (-not (Test-Path -LiteralPath $PackagedDependencyDescriptor -PathType Leaf)) {
+                    throw "Dependency build for '$DependencyName' succeeded but its packaged descriptor was not found at '$PackagedDependencyDescriptor'. Main plugin build was not started."
+                }
+                Write-Host "[DEPENDENCY BUILD SUCCESS] $DependencyName" -ForegroundColor Green
+                try {
+                    # AutomationTool packages manifest build products, including import libraries.
+                    Copy-Item -LiteralPath $DependencyBuildPlan.PackageDirectory -Destination $DependencyBuildPlan.ExposedDirectory -Recurse -ErrorAction Stop
+                    $TemporaryDependencyDirs += $DependencyBuildPlan.ExposedDirectory
+                } catch {
+                    if (Test-Path -LiteralPath $DependencyBuildPlan.ExposedDirectory) {
+                        $TemporaryDependencyDirs += $DependencyBuildPlan.ExposedDirectory
+                    }
+                    throw "Failed to expose built dependency '$DependencyName' at '$($DependencyBuildPlan.ExposedDirectory)': $($_.Exception.Message)"
+                }
+                Write-Host "[DEPENDENCY EXPOSED] $DependencyName -> $($DependencyBuildPlan.ExposedDirectory)" -ForegroundColor Cyan
+            }
+        }
+
+        Write-Host "Compiling plugin using generated host project..."
+        $MainBuildArguments = @('BuildPlugin', "-Plugin=$HostUpluginPath", "-Package=$PackageOutputDir", '-TargetPlatforms=Win64', '-Rocket')
+        & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" @MainBuildArguments *>&1 | Tee-Object -FilePath $LogFile -Append
         if ($LASTEXITCODE -ne 0) { throw "Packaging failed. Check the log file." }
         Write-Host "Build process completed successfully."
 
@@ -277,11 +363,24 @@ $CompilerXml
             }
         }
         
-        if (Test-Path $EngineBuildConfigPath) { Remove-Item -Path $EngineBuildConfigPath -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $EngineBuildConfigBackupPath) {
-            Move-Item -Path $EngineBuildConfigBackupPath -Destination $EngineBuildConfigPath -Force
+        foreach ($TemporaryDependencyDir in @($TemporaryDependencyDirs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) {
+            try {
+                if (Test-Path -LiteralPath $TemporaryDependencyDir) {
+                    Remove-Item -LiteralPath $TemporaryDependencyDir -Recurse -Force -ErrorAction Stop
+                }
+            } catch {
+                $GlobalSuccess = $false
+                Write-Warning "Could not remove temporary dependency directory '$TemporaryDependencyDir': $($_.Exception.Message)"
+            }
         }
+
         if ($EngineConfigLock) {
+            if (Test-Path -LiteralPath $EngineBuildConfigPath) {
+                Remove-Item -LiteralPath $EngineBuildConfigPath -Force -ErrorAction SilentlyContinue
+            }
+            if ($EngineBuildConfigBackupPath -and (Test-Path -LiteralPath $EngineBuildConfigBackupPath)) {
+                Move-Item -LiteralPath $EngineBuildConfigBackupPath -Destination $EngineBuildConfigPath -Force
+            }
             try { $EngineConfigLock.ReleaseMutex() } catch { }
             $EngineConfigLock.Dispose()
         }

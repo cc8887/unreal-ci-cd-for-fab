@@ -25,6 +25,13 @@ param (
     [ValidateNotNullOrEmpty()]
     [string]$OutputDirectory,
 
+    [Parameter(Mandatory=$true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$EnginePath,
+
+    [Parameter(Mandatory=$false)]
+    [string]$DependenciesJsonPath,
+
     [Parameter(Mandatory=$false)]
     [string]$ProjectName = 'HostProject',
 
@@ -53,6 +60,7 @@ if ($ProjectName -notmatch '^[A-Za-z][A-Za-z0-9_]*$') {
 
 $PluginSourceDirectory = Resolve-FullPath $PluginSourceDirectory $true
 $OutputDirectory = Resolve-FullPath $OutputDirectory $false
+$EnginePath = Resolve-FullPath $EnginePath $true
 $SourceUpluginPath = Join-Path $PluginSourceDirectory "$PluginName.uplugin"
 if (-not (Test-Path -LiteralPath $SourceUpluginPath -PathType Leaf)) {
     throw "Plugin descriptor not found: '$SourceUpluginPath'."
@@ -63,6 +71,58 @@ if ([string]::IsNullOrWhiteSpace($SourcePlugin.VersionName)) {
     throw "Plugin descriptor must define VersionName: '$SourceUpluginPath'."
 }
 
+$Dependencies = @()
+if (-not [string]::IsNullOrWhiteSpace($DependenciesJsonPath)) {
+    $DependenciesJsonPath = Resolve-FullPath $DependenciesJsonPath $true
+    $Dependencies = @(Get-Content -LiteralPath $DependenciesJsonPath -Raw | ConvertFrom-Json | Where-Object { $null -ne $_ })
+}
+$ProvidedPluginNames = @($PluginName) + @($Dependencies | ForEach-Object { $_.Name })
+
+function Copy-PluginToHost([string]$Name, [string]$SourceDirectory) {
+    $ResolvedSource = Resolve-FullPath $SourceDirectory $true
+    $DescriptorPath = Join-Path $ResolvedSource "$Name.uplugin"
+    if (-not (Test-Path -LiteralPath $DescriptorPath -PathType Leaf)) {
+        throw "Plugin descriptor not found: '$DescriptorPath'."
+    }
+
+    $Destination = Join-Path $OutputDirectory "Plugins/$Name"
+    New-Item -Path $Destination -ItemType Directory -Force | Out-Null
+    $ExcludeDirectories = @(
+        '.git', '.vs', '.vscode', '.idea', 'Binaries', 'Build', 'Intermediate',
+        'Saved', 'DerivedDataCache', '__pycache__', 'Packages'
+    )
+    $RobocopyArguments = @($ResolvedSource, $Destination, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP', '/XD') + $ExcludeDirectories
+    & robocopy @RobocopyArguments | Out-Null
+    if ($LASTEXITCODE -gt 7) {
+        throw "Failed to copy plugin '$Name'. Robocopy exit code: $LASTEXITCODE."
+    }
+    return $Destination
+}
+
+function Test-EnginePluginInstalled([string]$Name) {
+    $EnginePluginsDirectory = Join-Path $EnginePath 'Engine/Plugins'
+    return $null -ne (Get-ChildItem -LiteralPath $EnginePluginsDirectory -Filter "$Name.uplugin" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Update-HostPluginDescriptor([string]$Name, [string]$Directory) {
+    $DescriptorPath = Join-Path $Directory "$Name.uplugin"
+    $Descriptor = Get-Content -LiteralPath $DescriptorPath -Raw | ConvertFrom-Json
+    $Descriptor | Add-Member -NotePropertyName EngineVersion -NotePropertyValue "$EngineVersion.0" -Force
+    if ($Descriptor.Plugins) {
+        $FilteredReferences = @()
+        foreach ($Reference in @($Descriptor.Plugins)) {
+            if ($ProvidedPluginNames -contains $Reference.Name -or (Test-EnginePluginInstalled $Reference.Name)) {
+                $FilteredReferences += $Reference
+            } else {
+                Write-Warning "Removing unavailable engine plugin reference '$($Reference.Name)' from temporary descriptor '$Name' for UE $EngineVersion."
+            }
+        }
+        $Descriptor.Plugins = $FilteredReferences
+    }
+    $Descriptor | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $DescriptorPath -Encoding UTF8
+    return $DescriptorPath
+}
+
 if (Test-Path -LiteralPath $OutputDirectory) {
     if (-not $Force) {
         throw "Output directory already exists: '$OutputDirectory'. Use -Force to replace it."
@@ -71,30 +131,28 @@ if (Test-Path -LiteralPath $OutputDirectory) {
 }
 
 New-Item -Path $OutputDirectory -ItemType Directory -Force | Out-Null
-$HostPluginDirectory = Join-Path $OutputDirectory "Plugins/$PluginName"
-New-Item -Path $HostPluginDirectory -ItemType Directory -Force | Out-Null
-
-$ExcludeDirectories = @(
-    '.git', '.vs', '.vscode', '.idea', 'Binaries', 'Build', 'Intermediate',
-    'Saved', 'DerivedDataCache', '__pycache__', 'Packages'
-)
-$RobocopyArguments = @($PluginSourceDirectory, $HostPluginDirectory, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP', '/XD') + $ExcludeDirectories
-& robocopy @RobocopyArguments | Out-Null
-if ($LASTEXITCODE -gt 7) {
-    throw "Failed to copy plugin source. Robocopy exit code: $LASTEXITCODE."
+$HostPluginDirectory = Copy-PluginToHost $PluginName $PluginSourceDirectory
+$HostUpluginPath = Update-HostPluginDescriptor $PluginName $HostPluginDirectory
+$HostDependencies = @()
+foreach ($Dependency in $Dependencies) {
+    $DependencyDirectory = Copy-PluginToHost $Dependency.Name $Dependency.SourceDirectory
+    $DependencyDescriptor = Update-HostPluginDescriptor $Dependency.Name $DependencyDirectory
+    $HostDependencies += [ordered]@{
+        name = $Dependency.Name
+        sourceDirectory = (Resolve-FullPath $Dependency.SourceDirectory $true)
+        pluginDirectory = $DependencyDirectory
+        pluginDescriptor = $DependencyDescriptor
+    }
 }
 
-$HostUpluginPath = Join-Path $HostPluginDirectory "$PluginName.uplugin"
-$HostPlugin = Get-Content -LiteralPath $HostUpluginPath -Raw | ConvertFrom-Json
-$HostPlugin | Add-Member -NotePropertyName EngineVersion -NotePropertyValue "$EngineVersion.0" -Force
-$HostPlugin | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $HostUpluginPath -Encoding UTF8
-
+$EnabledPlugins = @([ordered]@{ Name = $PluginName; Enabled = $true })
+$EnabledPlugins += @($Dependencies | ForEach-Object { [ordered]@{ Name = $_.Name; Enabled = $true } })
 $ProjectDescriptor = [ordered]@{
     FileVersion = 3
     EngineAssociation = $EngineVersion
     Category = ''
     Description = "Generated host project for $PluginName"
-    Plugins = @([ordered]@{ Name = $PluginName; Enabled = $true })
+    Plugins = $EnabledPlugins
 }
 $ProjectPath = Join-Path $OutputDirectory "$ProjectName.uproject"
 $ProjectDescriptor | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ProjectPath -Encoding UTF8
@@ -111,6 +169,8 @@ $Metadata = [ordered]@{
     pluginName = $PluginName
     pluginVersion = $SourcePlugin.VersionName
     pluginSourceDirectory = $PluginSourceDirectory
+    enginePath = $EnginePath
+    dependencies = $HostDependencies
     projectFile = $ProjectPath
     pluginDescriptor = $HostUpluginPath
 }
@@ -120,7 +180,10 @@ $Metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $MetadataPath -En
 $ReadmePath = Join-Path $OutputDirectory 'README.md'
 $CompilerDisplay = if ([string]::IsNullOrWhiteSpace($CompilerVersion)) { 'UnrealBuildTool default' } else { "MSVC $CompilerVersion" }
 $BuildIdDisplay = if ([string]::IsNullOrWhiteSpace($BuildId)) { 'not specified' } else { $BuildId }
-$RegenerateCommand = ".\Tools\new_host_project.ps1 -EngineVersion `"$EngineVersion`" -PluginName `"$PluginName`" -PluginSourceDirectory `"$PluginSourceDirectory`" -OutputDirectory `"$OutputDirectory`""
+$RegenerateCommand = ".\Tools\new_host_project.ps1 -EngineVersion `"$EngineVersion`" -EnginePath `"$EnginePath`" -PluginName `"$PluginName`" -PluginSourceDirectory `"$PluginSourceDirectory`" -OutputDirectory `"$OutputDirectory`""
+if (-not [string]::IsNullOrWhiteSpace($DependenciesJsonPath)) {
+    $RegenerateCommand += " -DependenciesJsonPath `"$DependenciesJsonPath`""
+}
 if (-not [string]::IsNullOrWhiteSpace($CompilerVersion)) {
     $RegenerateCommand += " -CompilerVersion `"$CompilerVersion`""
 }

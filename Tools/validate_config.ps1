@@ -95,6 +95,39 @@ foreach ($field in $RequiredFields.Keys) {
 # --- 2. PLUGIN VALIDATION ---
 Write-Host "`n[2/6] Validating plugin configuration..." -ForegroundColor Yellow
 
+if ($Config.PSObject.Properties.Name -contains 'BuildPluginDependencies') {
+    if ($null -eq $Config.BuildPluginDependencies -or $Config.BuildPluginDependencies -isnot [Array]) {
+        Add-ValidationError "Optional field 'BuildPluginDependencies' must be an array"
+    } else {
+        $DependencyNames = @()
+        foreach ($Dependency in $Config.BuildPluginDependencies) {
+            if ([string]::IsNullOrWhiteSpace($Dependency.Name) -or [string]::IsNullOrWhiteSpace($Dependency.SourceDirectory)) {
+                Add-ValidationError "Each BuildPluginDependencies entry must define non-empty Name and SourceDirectory"
+                continue
+            }
+            if ($DependencyNames -contains $Dependency.Name -or $Dependency.Name -eq $Config.PluginName) {
+                Add-ValidationError "Duplicate or main plugin dependency name: '$($Dependency.Name)'"
+            }
+            $DependencyNames += $Dependency.Name
+            if (-not (Test-Path -LiteralPath $Dependency.SourceDirectory -PathType Container)) {
+                Add-ValidationError "Dependency source directory not found: '$($Dependency.SourceDirectory)'"
+                continue
+            }
+            $DependencyDescriptor = Join-Path $Dependency.SourceDirectory "$($Dependency.Name).uplugin"
+            if (-not (Test-Path -LiteralPath $DependencyDescriptor -PathType Leaf)) {
+                Add-ValidationError "Dependency .uplugin file not found: '$DependencyDescriptor'"
+                continue
+            }
+            try {
+                $null = Get-Content -LiteralPath $DependencyDescriptor -Raw | ConvertFrom-Json
+                Test-ValidationSuccess "Dependency plugin '$($Dependency.Name)' is valid"
+            } catch {
+                Add-ValidationError "Invalid dependency .uplugin file '$DependencyDescriptor': $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 if ($Config.PluginSourceDirectory) {
     if (Test-Path $Config.PluginSourceDirectory) {
         Test-ValidationSuccess "Plugin source directory exists"
