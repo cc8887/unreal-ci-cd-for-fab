@@ -1,0 +1,40 @@
+﻿{
+  "schema_version": 1,
+  "policy": "classify_and_suggest_only",
+  "rules": [
+    {
+      "id": "missing_engine",
+      "category": "environment",
+      "patterns": ["Could not find UE_", "Engine not found", "not recognized as an internal or external command"],
+      "suggestion": "确认 UnrealEngineBasePath、引擎安装目录和 PowerShell 可用性；不要修改源码。"
+    },
+    {
+      "id": "toolchain",
+      "category": "toolchain",
+      "patterns": ["Visual Studio", "toolchain", "CompilerVersion", "MSVC", "Windows SDK"],
+      "suggestion": "检查对应 UE 版本支持的 MSVC/Windows SDK；不要自动改 Build.cs 或 C++。"
+    },
+    {
+      "id": "api_compatibility",
+      "category": "source_compatibility",
+      "patterns": ["error C2039", "error C2664", "error C2065", "deprecated", "no member named"],
+      "suggestion": "交由 AI 阅读调用点和目标 UE API，使用最小版本条件修复。"
+    },
+    {
+      "id": "linker",
+      "category": "linker",
+      "patterns": ["LNK2019", "LNK2001", "unresolved external symbol"],
+      "suggestion": "交由 AI 核对模块依赖、导出宏和版本差异。"
+    },
+    {
+      "id": "packaging",
+      "category": "packaging",
+      "patterns": ["Compress-Archive", "Could not find the packaged .uplugin", "Zipping failed"],
+      "suggestion": "检查打包输出和文件锁；只允许清理本次 run_state 临时文件。"
+    }
+  ],
+  "fallback": {
+    "category": "unknown",
+    "suggestion": "交由 AI 结合完整日志与源码语义诊断，禁止确定性源码盲改。"
+  }
+}

@@ -1,0 +1,49 @@
+name: unreal-plugin-compile-fix-loop
+version: 2
+entrypoint: scripts/run.py
+params_transport: utf8_json_file
+params:
+  type: object
+  properties:
+    pipeline_repo:
+      type: string
+      default: "."
+    plugin_repo:
+      type: string
+      default: "<config_path:PluginSourceDirectory>"
+    config_path:
+      type: string
+      default: config.json
+    engine_versions:
+      type: array
+      items: {type: string}
+      default: ["4.27", "5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"]
+    max_repair_rounds:
+      type: integer
+      minimum: 0
+      default: 3
+    dry_run:
+      type: boolean
+      default: false
+    wait_for_completion:
+      type: boolean
+      default: true
+      description: 同步等待整批目标版本完成；false 时才脱离到后台 worker
+stages:
+  - {id: 1, name: strategy, kind: ai, duration: short, next: 2}
+  - id: 2
+    name: build_and_classify
+    kind: auto
+    duration: long
+    next: 3
+    implementation: scripts/stages/build_worker.py
+  - {id: 3, name: ai_repair_bridge, kind: ai, duration: short, next: 2}
+  - id: 4
+    name: full_matrix_regression
+    kind: auto
+    duration: long
+    next: 5
+    implementation: scripts/stages/regression_worker.py
+  - {id: 5, name: final_review, kind: ai, duration: short}
+completion: all_versions_built_and_zips_verified_and_ai_approved
+side_effects: {git_commit: false, git_push: false}
