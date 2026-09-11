@@ -98,6 +98,8 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
     $EngineBuildConfigBackupPath = $null
     $EngineConfigLock = $null
     $TemporaryDependencyDirs = @()
+    $TemporaryDependencyArtifactDirs = @()
+    $DependencyBuildPlans = @()
 
     $LogFile = Join-Path -Path $LogsDir -ChildPath "BuildLog_UE_${CurrentEngineVersion}_$Timestamp.txt"
 
@@ -130,7 +132,9 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
 
         # Pin each engine to a supported installed MSVC toolchain.
         $RequestedToolchainVersion = switch ($CurrentEngineVersion) {
+            "4.26" { "14.32" }
             "4.27" { "14.32" }
+            "5.0" { "14.32" }
             "5.1" { "14.32" }
             "5.2" { "14.34" }
             "5.3" { "14.36" }
@@ -175,7 +179,8 @@ foreach ($CurrentEngineVersion in $VersionsToProcess) {
         if ($Config.BuildOptions -and $Config.BuildOptions.PSObject.Properties.Name -contains 'UseClang' -and $Config.BuildOptions.UseClang) {
             $CompilerXml = "        <Compiler>Clang</Compiler>"
         } else {
-            $CompilerXml = "        <Compiler>VisualStudio2022</Compiler>`r`n        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
+            $CompilerName = if ($CurrentEngineVersion -eq '4.26') { 'VisualStudio2019' } else { 'VisualStudio2022' }
+            $CompilerXml = "        <Compiler>$CompilerName</Compiler>`r`n        <CompilerVersion>$($ToolchainVersion)</CompilerVersion>"
         }
 
         @"
@@ -252,6 +257,16 @@ $CompilerXml
                 $DependencyBuildPlans += [pscustomobject]@{
                     Name = $DependencyName
                     Descriptor = $HostDependencyDescriptor
+                    SourceDirectory = $HostDependencyDir
+                    AdditionalDirectories = @($Dependency.AdditionalDirectories)
+                    ExcludeUbtPlugins = [bool]$Dependency.ExcludeUbtPlugins
+                    ExposeSourceOnly = [bool]$Dependency.ExposeSourceOnly -and [version]$CurrentEngineVersion -ge [version]'5.1'
+                    PrebuildSource = [bool]$Dependency.PrebuildSource
+                    BuildUbtPlugins = [bool]$Dependency.BuildUbtPlugins
+                    RemoveModulesAfterPrebuild = @($Dependency.RemoveModulesAfterPrebuild)
+                    PostPrebuildTextReplacements = @($Dependency.PostPrebuildTextReplacements)
+                    ExcludeUbtPluginsAfterPrebuild = [bool]$Dependency.ExcludeUbtPluginsAfterPrebuild
+                    CleanupEnginePluginDirectories = @($Dependency.CleanupEnginePluginDirectories)
                     PackageDirectory = (Join-Path -Path $DependencyBuildRoot -ChildPath $DependencyName)
                     ExposedDirectory = $TemporaryDependencyDir
                 }
@@ -259,8 +274,132 @@ $CompilerXml
 
             foreach ($DependencyBuildPlan in $DependencyBuildPlans) {
                 $DependencyName = $DependencyBuildPlan.Name
+                if ($DependencyBuildPlan.ExposeSourceOnly) {
+                    try {
+                        foreach ($RelativeCleanupDirectory in @($DependencyBuildPlan.CleanupEnginePluginDirectories)) {
+                            if ([string]::IsNullOrWhiteSpace($RelativeCleanupDirectory) -or
+                                [System.IO.Path]::IsPathRooted($RelativeCleanupDirectory) -or
+                                $RelativeCleanupDirectory -match '(^|[\\/])[.][.]([\\/]|$)') {
+                                throw "Dependency '$DependencyName' has an unsafe CleanupEnginePluginDirectories entry: '$RelativeCleanupDirectory'."
+                            }
+                            $CleanupDirectory = Join-Path "$EnginePath/Engine/Plugins" $RelativeCleanupDirectory
+                            if (Test-Path -LiteralPath $CleanupDirectory) {
+                                throw "Dependency artifact destination already exists at '$CleanupDirectory'. Refusing to overwrite it."
+                            }
+                            $TemporaryDependencyArtifactDirs += $CleanupDirectory
+                        }
+                        Copy-Item -LiteralPath $DependencyBuildPlan.SourceDirectory -Destination $DependencyBuildPlan.ExposedDirectory -Recurse -ErrorAction Stop
+                        $TemporaryDependencyDirs += $DependencyBuildPlan.ExposedDirectory
+                        if ($DependencyBuildPlan.ExcludeUbtPlugins) {
+                            $UbtPluginProjects = @(Get-ChildItem -LiteralPath $DependencyBuildPlan.ExposedDirectory -Filter '*.ubtplugin.csproj' -File -Recurse)
+                            foreach ($UbtPluginProject in $UbtPluginProjects) {
+                                Remove-Item -LiteralPath $UbtPluginProject.FullName -Force
+                            }
+                            Write-Host "[DEPENDENCY UBT PLUGINS EXCLUDED] $DependencyName ($($UbtPluginProjects.Count))" -ForegroundColor Cyan
+                        }
+                    } catch {
+                        if (Test-Path -LiteralPath $DependencyBuildPlan.ExposedDirectory) {
+                            $TemporaryDependencyDirs += $DependencyBuildPlan.ExposedDirectory
+                        }
+                        throw "Failed to expose source dependency '$DependencyName': $($_.Exception.Message)"
+                    }
+                    Write-Host "[DEPENDENCY SOURCE EXPOSED] $DependencyName -> $($DependencyBuildPlan.ExposedDirectory)" -ForegroundColor Cyan
+                    if ($DependencyBuildPlan.PrebuildSource) {
+                        if ($DependencyBuildPlan.BuildUbtPlugins -and [version]$CurrentEngineVersion -ge [version]'5.0') {
+                            $DotNetExecutable = Get-ChildItem -LiteralPath "$EnginePath/Engine/Binaries/ThirdParty/DotNet" -Filter 'dotnet.exe' -File -Recurse | Select-Object -First 1
+                            if (-not $DotNetExecutable) {
+                                throw "Target engine does not provide a bundled dotnet.exe for dependency UBT plugins."
+                            }
+                            $UbtPluginProjects = @(Get-ChildItem -LiteralPath $DependencyBuildPlan.ExposedDirectory -Filter '*.ubtplugin.csproj' -File -Recurse)
+                            foreach ($UbtPluginProject in $UbtPluginProjects) {
+                                Write-Host "[DEPENDENCY UBT PLUGIN BUILD] $($UbtPluginProject.Name)" -ForegroundColor Cyan
+                                & $DotNetExecutable.FullName build $UbtPluginProject.FullName -c Development "-p:EngineDir=$EnginePath/Engine" *>&1 | Tee-Object -FilePath $LogFile -Append
+                                if ($LASTEXITCODE -ne 0) {
+                                    throw "Dependency UBT plugin build failed for '$($UbtPluginProject.FullName)'. Check '$LogFile'."
+                                }
+                            }
+                        }
+                        $DependencyHostProject = Join-Path $TempDir "${DependencyName}Host.uproject"
+                        [ordered]@{
+                            FileVersion = 3
+                            EngineAssociation = $CurrentEngineVersion
+                            Plugins = @([ordered]@{ Name = $DependencyName; Enabled = $true })
+                        } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $DependencyHostProject -Encoding UTF8
+                        $EditorTarget = if ([version]$CurrentEngineVersion -lt [version]'5.0') { 'UE4Editor' } else { 'UnrealEditor' }
+                        $GameTarget = if ([version]$CurrentEngineVersion -lt [version]'5.0') { 'UE4Game' } else { 'UnrealGame' }
+                        $DependencyTargets = @(
+                            [pscustomobject]@{ Target = $EditorTarget; Platform = 'Win64'; Configuration = 'Development' }
+                            [pscustomobject]@{ Target = $GameTarget; Platform = 'Win64'; Configuration = 'Development' }
+                            [pscustomobject]@{ Target = $GameTarget; Platform = 'Win64'; Configuration = 'Shipping' }
+                        )
+                        foreach ($DependencyTarget in $DependencyTargets) {
+                            $TargetLabel = "$($DependencyTarget.Target) $($DependencyTarget.Platform) $($DependencyTarget.Configuration)"
+                            $BuildArguments = @($DependencyTarget.Target, $DependencyTarget.Platform, $DependencyTarget.Configuration) + @("-Project=$DependencyHostProject", "-Plugin=$($DependencyBuildPlan.ExposedDirectory)/$DependencyName.uplugin", '-NoUBTMakefiles', '-NoHotReload', '-WaitMutex')
+                            Write-Host "[DEPENDENCY SOURCE BUILD] $DependencyName $TargetLabel" -ForegroundColor Cyan
+                            & "$EnginePath/Engine/Build/BatchFiles/Build.bat" @BuildArguments *>&1 | Tee-Object -FilePath $LogFile -Append
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Source dependency build failed for '$DependencyName' target '$TargetLabel'. Check '$LogFile'."
+                            }
+                        }
+                        if ($DependencyBuildPlan.RemoveModulesAfterPrebuild.Count -gt 0) {
+                            $ExposedDescriptorPath = Join-Path $DependencyBuildPlan.ExposedDirectory "$DependencyName.uplugin"
+                            $ExposedDescriptor = Get-Content -LiteralPath $ExposedDescriptorPath -Raw | ConvertFrom-Json
+                            $ExposedDescriptor.Modules = @($ExposedDescriptor.Modules | Where-Object { $DependencyBuildPlan.RemoveModulesAfterPrebuild -notcontains $_.Name })
+                            $ExposedDescriptor | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $ExposedDescriptorPath -Encoding UTF8
+                            foreach ($RemovedModule in $DependencyBuildPlan.RemoveModulesAfterPrebuild) {
+                                if ([string]::IsNullOrWhiteSpace([string]$RemovedModule) -or [string]$RemovedModule -notmatch '^[A-Za-z0-9_.-]+$') {
+                                    throw "Dependency '$DependencyName' has an unsafe RemoveModulesAfterPrebuild entry: '$RemovedModule'."
+                                }
+                                $RemovedModuleSource = Join-Path $DependencyBuildPlan.ExposedDirectory "Source/$RemovedModule"
+                                if (Test-Path -LiteralPath $RemovedModuleSource -PathType Container) {
+                                    Remove-Item -LiteralPath $RemovedModuleSource -Recurse -Force -ErrorAction Stop
+                                }
+                            }
+                            Write-Host "[DEPENDENCY MODULES EXCLUDED AFTER PREBUILD] $DependencyName ($($DependencyBuildPlan.RemoveModulesAfterPrebuild -join ', '))" -ForegroundColor Cyan
+                        }
+                        foreach ($Replacement in $DependencyBuildPlan.PostPrebuildTextReplacements) {
+                            $RelativeFile = [string]$Replacement.File
+                            $OldText = [string]$Replacement.Old
+                            $NewText = [string]$Replacement.New
+                            if ([string]::IsNullOrWhiteSpace($RelativeFile) -or
+                                [System.IO.Path]::IsPathRooted($RelativeFile) -or
+                                $RelativeFile -match '(^|[\\/])[.][.]([\\/]|$)') {
+                                throw "Dependency '$DependencyName' has an unsafe PostPrebuildTextReplacements file: '$RelativeFile'."
+                            }
+                            if ([string]::IsNullOrEmpty($OldText)) {
+                                throw "Dependency '$DependencyName' has a PostPrebuildTextReplacements entry with empty Old text."
+                            }
+                            $ReplacementFile = Join-Path $DependencyBuildPlan.ExposedDirectory $RelativeFile
+                            if (-not (Test-Path -LiteralPath $ReplacementFile -PathType Leaf)) {
+                                throw "Dependency post-prebuild replacement file was not found: '$ReplacementFile'."
+                            }
+                            $ReplacementContent = Get-Content -LiteralPath $ReplacementFile -Raw
+                            $MatchCount = ([regex]::Matches($ReplacementContent, [regex]::Escape($OldText))).Count
+                            if ($MatchCount -ne 1) {
+                                throw "Dependency post-prebuild replacement expected one exact match in '$ReplacementFile', found $MatchCount."
+                            }
+                            $ReplacementContent = $ReplacementContent.Replace($OldText, $NewText)
+                            Set-Content -LiteralPath $ReplacementFile -Value $ReplacementContent -Encoding UTF8
+                            Write-Host "[DEPENDENCY TEXT REPLACED AFTER PREBUILD] $DependencyName/$RelativeFile" -ForegroundColor Cyan
+                        }
+                        if ($DependencyBuildPlan.ExcludeUbtPluginsAfterPrebuild) {
+                            $PostBuildUbtPluginProjects = @(Get-ChildItem -LiteralPath $DependencyBuildPlan.ExposedDirectory -Filter '*.ubtplugin.csproj' -File -Recurse)
+                            foreach ($UbtPluginProject in $PostBuildUbtPluginProjects) {
+                                Remove-Item -LiteralPath $UbtPluginProject.FullName -Force
+                            }
+                            Write-Host "[DEPENDENCY UBT PLUGINS EXCLUDED AFTER PREBUILD] $DependencyName ($($PostBuildUbtPluginProjects.Count))" -ForegroundColor Cyan
+                        }
+                    }
+                    continue
+                }
                 Write-Host "[DEPENDENCY BUILD START] $DependencyName" -ForegroundColor Cyan
                 $DependencyBuildArguments = @('BuildPlugin', "-Plugin=$($DependencyBuildPlan.Descriptor)", "-Package=$($DependencyBuildPlan.PackageDirectory)", '-TargetPlatforms=Win64', '-Rocket')
+                if ([version]$CurrentEngineVersion -lt [version]'5.0') {
+                    # UE4 BuildPlugin otherwise appends -2017 to non-editor targets.
+                    # The switch name is historical; it suppresses that override so
+                    # the explicitly configured compiler/toolchain remains in force.
+                    $DependencyBuildArguments += '-VS2019'
+                }
                 & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" @DependencyBuildArguments *>&1 | Tee-Object -FilePath $LogFile -Append
                 if ($LASTEXITCODE -ne 0) {
                     throw "Dependency build failed for '$DependencyName'. Main plugin build was not started. Check '$LogFile'."
@@ -268,6 +407,27 @@ $CompilerXml
                 $PackagedDependencyDescriptor = Join-Path -Path $DependencyBuildPlan.PackageDirectory -ChildPath "$DependencyName.uplugin"
                 if (-not (Test-Path -LiteralPath $PackagedDependencyDescriptor -PathType Leaf)) {
                     throw "Dependency build for '$DependencyName' succeeded but its packaged descriptor was not found at '$PackagedDependencyDescriptor'. Main plugin build was not started."
+                }
+                foreach ($RelativeDirectory in @($DependencyBuildPlan.AdditionalDirectories)) {
+                    if ([string]::IsNullOrWhiteSpace($RelativeDirectory) -or
+                        [System.IO.Path]::IsPathRooted($RelativeDirectory) -or
+                        $RelativeDirectory -match '(^|[\\/])[.][.]([\\/]|$)') {
+                        throw "Dependency '$DependencyName' has an unsafe AdditionalDirectories entry: '$RelativeDirectory'."
+                    }
+                    $AdditionalSource = Join-Path $DependencyBuildPlan.SourceDirectory $RelativeDirectory
+                    if (-not (Test-Path -LiteralPath $AdditionalSource -PathType Container)) {
+                        throw "Additional dependency directory was not found: '$AdditionalSource'."
+                    }
+                    $AdditionalDestination = Join-Path $DependencyBuildPlan.PackageDirectory $RelativeDirectory
+                    Copy-Item -LiteralPath $AdditionalSource -Destination $AdditionalDestination -Recurse -Force -ErrorAction Stop
+                    Write-Host "[DEPENDENCY ASSET COPIED] $DependencyName/$RelativeDirectory" -ForegroundColor Cyan
+                }
+                if ($DependencyBuildPlan.ExcludeUbtPlugins) {
+                    $UbtPluginProjects = @(Get-ChildItem -LiteralPath $DependencyBuildPlan.PackageDirectory -Filter '*.ubtplugin.csproj' -File -Recurse)
+                    foreach ($UbtPluginProject in $UbtPluginProjects) {
+                        Remove-Item -LiteralPath $UbtPluginProject.FullName -Force
+                    }
+                    Write-Host "[DEPENDENCY UBT PLUGINS EXCLUDED] $DependencyName ($($UbtPluginProjects.Count))" -ForegroundColor Cyan
                 }
                 Write-Host "[DEPENDENCY BUILD SUCCESS] $DependencyName" -ForegroundColor Green
                 try {
@@ -286,6 +446,9 @@ $CompilerXml
 
         Write-Host "Compiling plugin using generated host project..."
         $MainBuildArguments = @('BuildPlugin', "-Plugin=$HostUpluginPath", "-Package=$PackageOutputDir", '-TargetPlatforms=Win64', '-Rocket')
+        if ([version]$CurrentEngineVersion -lt [version]'5.0') {
+            $MainBuildArguments += '-VS2019'
+        }
         & "$EnginePath/Engine/Build/BatchFiles/RunUAT.bat" @MainBuildArguments *>&1 | Tee-Object -FilePath $LogFile -Append
         if ($LASTEXITCODE -ne 0) { throw "Packaging failed. Check the log file." }
         Write-Host "Build process completed successfully."
@@ -305,7 +468,7 @@ $CompilerXml
         $PluginRootInStage = Join-Path -Path $CleanedPluginStageDir -ChildPath $Config.PluginName
         New-Item -Path $PluginRootInStage -ItemType Directory -Force | Out-Null
 
-        "Source", "Content", "Resources" | ForEach-Object {
+        "Binaries", "Config", "Source", "Content", "Resources" | ForEach-Object {
             $SourcePath = Join-Path -Path $SourceForCleaning -ChildPath $_
             if (Test-Path $SourcePath) { Copy-Item -Recurse -Force -Path $SourcePath -Destination (Join-Path -Path $PluginRootInStage -ChildPath $_) }
         }
@@ -371,6 +534,17 @@ $CompilerXml
             } catch {
                 $GlobalSuccess = $false
                 Write-Warning "Could not remove temporary dependency directory '$TemporaryDependencyDir': $($_.Exception.Message)"
+            }
+        }
+
+        foreach ($TemporaryDependencyArtifactDir in @($TemporaryDependencyArtifactDirs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) {
+            try {
+                if (Test-Path -LiteralPath $TemporaryDependencyArtifactDir) {
+                    Remove-Item -LiteralPath $TemporaryDependencyArtifactDir -Recurse -Force -ErrorAction Stop
+                }
+            } catch {
+                $GlobalSuccess = $false
+                Write-Warning "Could not remove temporary dependency artifact directory '$TemporaryDependencyArtifactDir': $($_.Exception.Message)"
             }
         }
 

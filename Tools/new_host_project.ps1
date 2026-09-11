@@ -10,7 +10,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$true)]
-    [ValidatePattern('^(4[.]27|5[.][0-9]+)$')]
+    [ValidatePattern('^(4[.](26|27)|5[.][0-9]+)$')]
     [string]$EngineVersion,
 
     [Parameter(Mandatory=$true)]
@@ -95,6 +95,18 @@ function Copy-PluginToHost([string]$Name, [string]$SourceDirectory) {
     & robocopy @RobocopyArguments | Out-Null
     if ($LASTEXITCODE -gt 7) {
         throw "Failed to copy plugin '$Name'. Robocopy exit code: $LASTEXITCODE."
+    }
+
+    # Preserve prebuilt third-party import/runtime libraries without copying
+    # engine-version-specific module binaries from Binaries/Win64.
+    $ThirdPartyBinaries = Join-Path $ResolvedSource 'Binaries/ThirdParty'
+    if (Test-Path -LiteralPath $ThirdPartyBinaries -PathType Container) {
+        $ThirdPartyDestination = Join-Path $Destination 'Binaries/ThirdParty'
+        New-Item -Path $ThirdPartyDestination -ItemType Directory -Force | Out-Null
+        & robocopy $ThirdPartyBinaries $ThirdPartyDestination /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "Failed to copy third-party binaries for plugin '$Name'. Robocopy exit code: $LASTEXITCODE."
+        }
     }
     return $Destination
 }
